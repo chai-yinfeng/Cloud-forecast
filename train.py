@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.autograd as autograd
 from torch.optim import Adam
+from torch.utils.tensorboard import SummaryWriter
 
 from model import (
     ConvLSTMSimple,
@@ -9,11 +10,14 @@ from model import (
     ConvLSTMEncode2DecodeUNet,
     SA_ConvLSTMEncode2Decode,
     Discriminator,
-    generator_loss_function
+    generator_loss_function,
+    sa_lstm_loss
 )
 
 import numpy as np
 import time, os
+import random
+from tqdm import tqdm
 
 # 根据模型名称 & 参数，实例化要测试的模型
 def get_model(model_name: str, params: dict):
@@ -85,7 +89,7 @@ def create_mask_true(batch_size, out_frames, in_channels, height, width, eta):
 
 
 # 不带 GAN 的基本训练循环
-def train_basic_model(model, model_name, train_loader, val_loader, params, device):
+def train_basic_model(model, model_name, train_loader, val_loader, params, device, writer=None):
     """
     针对不需要判别器的情况:
       - ConvLSTMSimple
@@ -95,7 +99,7 @@ def train_basic_model(model, model_name, train_loader, val_loader, params, devic
     """
     model = model.to(device)
     optimizer = Adam(model.parameters(), lr=params.get('lr', 1e-3))
-    criterion_mse = nn.MSELoss()    # 根据具体情况测试其他损失函数, 或使用generator_loss_function的返回值
+    criterion = sa_lstm_loss    # 根据具体情况测试其他损失函数
 
     use_scheduled_sampling = False
     if 'sa_encode2decode' in model_name:
@@ -115,7 +119,8 @@ def train_basic_model(model, model_name, train_loader, val_loader, params, devic
         iter_count = 0
 
         # ==================== 训练集 ====================
-        for batch_data, batch_target in train_loader:
+        pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{epochs}", ncols=100)
+        for batch_idx, (batch_data, batch_target) in enumerate(pbar):
             batch_data = batch_data.to(device)      # [B, input_frames, 1, H, W]
             batch_target = batch_target.to(device)  # [B, target_frames, 1, H, W]
             B, _, C, H, W = batch_data.shape
@@ -133,12 +138,14 @@ def train_basic_model(model, model_name, train_loader, val_loader, params, devic
                 pred = model(batch_data)
 
             # 计算loss
-            loss = criterion_mse(pred, batch_target)
+            loss, L_rec, L_ssim = criterion(pred, batch_target)
             loss.backward()
             optimizer.step()
 
             total_train_loss += loss.item()
             iter_count += 1
+
+            pbar.set_postfix({"train_loss": f"{loss.item():.4f}"})
 
         avg_train_loss = total_train_loss / iter_count
 
@@ -148,7 +155,8 @@ def train_basic_model(model, model_name, train_loader, val_loader, params, devic
         val_count = 0
 
         with torch.no_grad():
-            for val_data, val_target in val_loader:
+            pbar = tqdm(val_loader, desc=f"Epoch {epoch+1}/{epochs}", ncols=100)
+            for val_idx, (val_data, val_target) in enumerate(pbar):
                 val_data = val_data.to(device)
                 val_target = val_target.to(device)
 
@@ -158,16 +166,55 @@ def train_basic_model(model, model_name, train_loader, val_loader, params, devic
                 else:
                     pred = model(val_data)
 
-                val_loss = criterion_mse(pred, val_target)
+                val_loss, L_rec, L_ssim = criterion(pred, val_target)
                 total_val_loss += val_loss.item()
                 val_count += 1
 
+                pbar.set_postfix({"val_loss": f"{val_loss.item():.4f}"})
+
         avg_val_loss = total_val_loss / val_count
+
+        if writer is not None:
+            writer.add_scalar('Loss/Train', avg_train_loss, epoch)
+            writer.add_scalar('Loss/Val',   avg_val_loss,   epoch)
+
         print(f"[{model_name}] Epoch {epoch+1}/{epochs} | TrainLoss={avg_train_loss:.4f} | ValLoss={avg_val_loss:.4f}")
 
-        # 定期保存 checkpoint (每5个epoch)
-        if (epoch+1) % 5 == 0:
-            save_path = f"checkpoint_{model_name}_epoch{epoch+1}.pth"
+        # 随机可视化一些预测结果到 TensorBoard
+        num_val_batches = len(val_loader)
+        random_batch_idx = random.randint(0, num_val_batches - 1)
+
+        for i, (val_data, val_target) in enumerate(val_loader):
+            if i == random_batch_idx:
+                val_data = val_data.to(device)
+                val_target = val_target.to(device)
+                if use_scheduled_sampling:
+                    pred_vis = model(val_data, val_target, mask_true=None, is_training=False)
+                else:
+                    pred_vis = model(val_data)
+                # pred_vis: [B, out_frames, 1, H, W]
+                
+                # 拼接图片方便显示
+                pred_frames = []
+                for t in range(pred_vis.shape[1]):
+                    pred_frames.append(pred_vis[0, t])  # [C, H, W]
+                # 将 list 里的张量在宽度维度上拼接 -> [C, H, W*T]
+                pred_concat = torch.cat(pred_frames, dim=-1)
+
+                # 同理处理 GroundTruth
+                gt_frames = []
+                for t in range(val_target.shape[1]):
+                    gt_frames.append(val_target[0, t])  # [C, H, W]
+                gt_concat = torch.cat(gt_frames, dim=-1)  # [C, H, W*T]
+
+                if writer is not None:
+                    writer.add_image("Prediction", pred_concat, epoch)
+                    writer.add_image("GroundTruth", gt_concat, epoch)
+                break
+
+        if (epoch + 1) % 5 == 0:
+            # 保存 checkpoint
+            save_path = f"checkpoint/{model_name}_epoch{epoch+1}.pth"
             torch.save({
                 'epoch': epoch,
                 'model_state_dict': model.state_dict(),
@@ -204,7 +251,7 @@ def compute_gradient_penalty(D, real_samples, fake_samples, device):
     return gp
 
 
-def train_gan_model(model, train_loader, val_loader, params, device):
+def train_gan_model(model, train_loader, val_loader, params, device, writer=None):
     """
     针对 'sa_encode2decode_gan' 模型的训练过程:
     - 生成器: SA_ConvLSTMEncode2Decode
@@ -232,7 +279,8 @@ def train_gan_model(model, train_loader, val_loader, params, device):
         total_G_loss = 0.0
         iter_count = 0
 
-        for batch_data, batch_target in train_loader:
+        pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{epochs}", ncols=100)
+        for batch_idx, (batch_data, batch_target) in enumerate(pbar):
             batch_data = batch_data.to(device)     # [B, in_frames, 1, H, W]
             batch_target = batch_target.to(device) # [B, out_frames, 1, H, W]
             B, _, C, H, W = batch_data.shape
@@ -270,6 +318,8 @@ def train_gan_model(model, train_loader, val_loader, params, device):
 
             total_D_loss += d_loss.item()
 
+            pbar.set_postfix({"D_loss": f"{d_loss.item():.4f}"})
+
             # 3) 再训练生成器 G
             # 隔一步或隔几步做一次generator的更新, 目前为 2步判别器 + 1步生成器
             if iter_count % 2 == 0:
@@ -282,14 +332,45 @@ def train_gan_model(model, train_loader, val_loader, params, device):
                 g_optim.step()
                 total_G_loss += L_total.item()
 
+                pbar.set_postfix({"G_loss": f"{L_total.item():.4f}"})
+
             iter_count += 1
 
         # 打印平均loss
         avg_D_loss = total_D_loss / iter_count
         avg_G_loss = total_G_loss / (iter_count/2 if iter_count>0 else 1)
+
+        if writer is not None:
+            writer.add_scalar('Loss/Discriminator', avg_D_loss, epoch)
+            writer.add_scalar('Loss/Generator',   avg_G_loss, epoch)
+
         print(f"[GAN] Epoch {epoch+1}/{epochs} | D_loss={avg_D_loss:.4f} | G_loss={avg_G_loss:.4f}")
 
-        # 可做验证, 保存 checkpoint 
+        num_val_batches = len(val_loader)
+        random_batch_idx = random.randint(0, num_val_batches - 1)
+
+        for i, (val_data, val_target) in enumerate(val_loader):
+            if i == random_batch_idx:
+                val_data = val_data.to(device)
+                val_target = val_target.to(device)
+
+                pred_vis = model(val_data, val_target, mask_true=None, is_training=False)
+
+                pred_frames = []
+                for t in range(pred_vis.shape[1]):
+                    pred_frames.append(pred_vis[0, t])  # 
+                # [C, H, W] -> [C, H, W*T]
+                pred_concat = torch.cat(pred_frames, dim=-1)
+                gt_frames = []
+                for t in range(val_target.shape[1]):
+                    gt_frames.append(val_target[0, t])
+                gt_concat = torch.cat(gt_frames, dim=-1)
+
+                if writer is not None:
+                    writer.add_image("GAN_Prediction", pred_concat, epoch)
+                    writer.add_image("GAN_GroundTruth", gt_concat, epoch)
+                break
+
         if (epoch+1) % 5 == 0:
             torch.save({
                 'epoch': epoch,
@@ -298,13 +379,13 @@ def train_gan_model(model, train_loader, val_loader, params, device):
                 'g_optim': g_optim.state_dict(),
                 'd_optim': d_optim.state_dict(),
                 'eta': eta
-            }, f"gan_checkpoint_epoch{epoch+1}.pth")
+            }, f"checkpoint/sa_encode2decode_gan_epoch{epoch+1}.pth")
 
     return model, D
 
 
 # 封装一个总的 train_model 接口 (让 main.py 调用)
-def train_model(model_name, train_loader, val_loader, params, device):
+def train_model(model_name, train_loader, val_loader, params, device, writer=None):
     """
     外部接口:
       - 如果model_name中带'gan', 则走 train_gan_model
@@ -320,9 +401,9 @@ def train_model(model_name, train_loader, val_loader, params, device):
     # 2) 若是 gan
     if 'gan' in model_name:
         # 走GAN的训练
-        model, D = train_gan_model(model, train_loader, val_loader, params, device)
+        model, D = train_gan_model(model, train_loader, val_loader, params, device, writer)
         return model, D
     else:
         # 普通训练
-        model = train_basic_model(model, model_name, train_loader, val_loader, params, device)
+        model = train_basic_model(model, model_name, train_loader, val_loader, params, device, writer)
         return model, None

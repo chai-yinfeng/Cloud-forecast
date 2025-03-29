@@ -105,6 +105,8 @@ class ConvLSTMSimple(nn.Module):
         self.hidden_dim = params['hidden_dim']
         self.img_size = params['img_size']  # (H, W)
         self.bias = params['bias']
+        self.input_window_size = params['input_window_size']  # T_in
+        self.output_window_size = params['output_window_size']  # T_out
         
         # input_dim --> hidden_dim
         self.in_conv = nn.Conv2d(
@@ -146,25 +148,34 @@ class ConvLSTMSimple(nn.Module):
         Returns:
             outputs (torch.Tensor): [B, T, C, H, W], 与输入相同分辨率和通道数
         """
-        B, T, C, H, W = frames.shape
+        B, T_in, C, H, W = frames.shape
+        seq_len = T_in + self.output_window_size
 
         if hidden is None:
             hidden = self._init_hidden(batch_size=B)
 
         outputs = []
-        for t in range(T):
-            x = frames[:, t]            # [B, C, H, W]
+        x_prev = None  # 保存上一时刻输出
+        for t in range(seq_len):
+            if t < T_in:    # 前 T_in 步用真实输入
+                x_in = frames[:, t]            # [B, C, H, W]
+            else:           # 后 T_out 步用前一步的预测
+                x_in = x_prev
+
             x = self.in_conv(x)         # [B, hidden_dim, H, W]
 
             for i, cell in enumerate(self.cells):
-                x, hidden[i] = cell(x, hidden[i])
-                x = self.bns[i](x)
+                x_in, hidden[i] = cell(x_in, hidden[i])
+                x_in = self.bns[i](x_in)
 
-            x = self.out_conv(x)  # [B, input_dim, H, W]
-            outputs.append(x)
+            x_out = self.out_conv(x_in)  # [B, input_dim, H, W]
+            x_prev = x_out  # 保存给下一个时刻使用
+            outputs.append(x_out)
         
         outputs = torch.stack(outputs, dim=1)  # [B, T, input_dim, H, W]
-        return outputs
+        pred_outputs = outputs[:, T_in:, :, :, :]
+
+        return pred_outputs
     
     def _init_hidden(self, batch_size: int) -> List[Tuple[torch.Tensor, torch.Tensor]]:
         """
@@ -203,6 +214,8 @@ class ConvLSTMEncode2Decode(nn.Module):
         self.input_dim = params['input_dim']
         self.hidden_dim = params['hidden_dim']
         self.bias = params['bias']
+        self.input_window_size = params['input_window_size']  # T_in
+        self.output_window_size = params['output_window_size']  # T_out
 
         # 2 times downsampling, size of features map becomes 1/4
         self.encoded_size = (params['img_size'][0] // 4, params['img_size'][1] // 4)
@@ -244,24 +257,31 @@ class ConvLSTMEncode2Decode(nn.Module):
         Returns:
             torch.Tensor: 模型输出，形状为 [batch_size, time_steps, input_dim, height, width]。
         """
-        B, T, C, H, W = frames.shape
+        B, T_in, C, H, W = frames.shape
+        seq_len = T_in + self.output_window_size
         if hidden is None:
             hidden = self._init_hidden(batch_size=B)
 
         outputs = []
-        for t in range(T):
-            x = frames[:, t]    # [B, input_dim, H, W]
-            x = self.img_encode(x)  # [B, hidden_dim, H/4, W/4]
+        x_prev = None
+        for t in range(seq_len):
+            if t < T_in:
+                x_in = frames[:, t]    # [B, input_dim, H, W]
+            else:
+                x_in = x_prev
+
+            enc = self.img_encode(x_in)  # [B, hidden_dim, H/4, W/4]
 
             for i, cell in enumerate(self.cells):
-                x, hidden[i] = cell(x, hidden[i])
-                x = self.bns[i](x)
+                enc, hidden[i] = cell(enc, hidden[i])
+                enc = self.bns[i](enc)
 
-            x = self.img_decode(x)
-            outputs.append(x)
+            dec = self.img_decode(enc)
+            x_prev = dec
+            outputs.append(dec)
 
         outputs = torch.stack(outputs, dim=1)   # [B, hidden_dim, H/4, W/4]
-        return outputs
+        return outputs[:, T_in:]    # => [B, T_out, C, H, W]
     
     def _init_hidden(self, batch_size: int) -> List[Tuple[torch.Tensor, torch.Tensor]]:
         """
@@ -391,6 +411,8 @@ class ConvLSTMEncode2DecodeUNet(nn.Module):
         self.hidden_dim = params['hidden_dim']
         self.img_size = params['img_size']  # (H, W)
         self.bias = params['bias']
+        self.input_window_size = params['input_window_size']  # T_in
+        self.output_window_size = params['output_window_size']  # T_out
 
         self.encoder = UNetEncoder(input_dim=self.input_dim, hidden_dim=self.hidden_dim)
 
@@ -417,13 +439,19 @@ class ConvLSTMEncode2DecodeUNet(nn.Module):
         return:
             outputs: [B, T, C, H, W], 每个时间步都输出与输入分辨率相同的图像.
         """
-        B, T, C, H, W = frames.shape
+        B, T_in, C, H, W = frames.shape
+        seq_len = T_in + self.output_window_size
         if hidden is None:
             hidden = self._init_hidden(B)
 
         outputs = []
-        for t in range(T):
-            x1, x2, x3 = self.encoder(frames[:, t])  
+        x_prev = None
+        for t in range(seq_len):
+            if t < T_in:
+                x_in = frames[:, t]
+            else:
+                x_in = x_prev
+            x1, x2, x3 = self.encoder(x_in)  
             # x1: [B, hidden_dim, H,   W  ]
             # x2: [B, hidden_dim, H/2, W/2]
             # x3: [B, hidden_dim, H/4, W/4]
@@ -433,10 +461,11 @@ class ConvLSTMEncode2DecodeUNet(nn.Module):
                 x3 = self.bns[i](x3)
 
             out = self.decoder(x3, x2, x1)  # [B, input_dim, H, W]
+            x_prev = out
             outputs.append(out)
 
         outputs = torch.stack(outputs, dim=1)   # [B, T, input_dim, H, W]
-        return outputs
+        return outputs[:, T_in:]
 
     def _init_hidden(self, batch_size: int) -> List[Tuple[torch.Tensor, torch.Tensor]]:
         """
@@ -479,7 +508,7 @@ class self_attention_memory_module(nn.Module):
         # (Z, h) --> (mo, mg, mi)
         self.layer_m = nn.Conv2d(input_dim * 3, input_dim * 3, 1)
 
-    def forward(self, h: torch.Tensor, m: torch.Tensor) -> Tuple[torch.Tenosr, torch.Tensor]:
+    def forward(self, h: torch.Tensor, m: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         h: [B, input_dim, H, W], 当前时刻由 ConvLSTM 得到的 h
         m: [B, input_dim, H, W], 记忆状态(上一时刻或初始化时全0)
@@ -829,6 +858,29 @@ class generator_loss_function(nn.Module):
         L_total = L_rec + 1e-2 * (1 - L_ssim) + 1e-4 * L_adv
 
         return L_total, L_rec, L_ssim, L_adv
+
+# 再写一个给普通(不使用GAN)模型的损失函数，不含对抗损失
+def sa_lstm_loss(output, target):
+    loss_mae = nn.L1Loss()
+    loss_mse = nn.MSELoss()
+    loss_ssim = ssim
+
+    L_rec = loss_mae(output, target) + loss_mse(output, target)
+
+    output_np = output.detach().cpu().numpy()
+    target_np = target.detach().cpu().numpy()
+
+    ssim_value = 0
+    for i in range(output_np.shape[0]):
+        ssim_seq = 0
+        for k in range(output_np.shape[1]):
+            result = loss_ssim(output_np[i, k, 0, :, :] * 255, target_np[i, k, 0, :, :] * 255, data_range=255)
+            ssim_seq += result
+        ssim_value += ssim_seq / 6
+
+    L_ssim = ssim_value / output_np.shape[0]
+
+    return L_rec + 0.01 * (1 - L_ssim), L_rec, L_ssim
 
 
 ###############################################################################

@@ -1,6 +1,7 @@
 import torch
 import argparse
 from torch.utils.data import DataLoader
+from torch.utils.tensorboard import SummaryWriter
 
 from dataset import SequenceDataset
 from train import train_model
@@ -39,7 +40,7 @@ def main():
         'lr': args.lr,
 
         'input_window_size': args.input_frames,
-        'output_window_size': args.target_frames,
+        'output_window_size': args.output_frames,
         'img_size': (args.img_size, args.img_size),
 
         # schedule sampling相关参数(仅在注意力+SS模型时会用)
@@ -59,13 +60,13 @@ def main():
 
     # 2) 数据集
     train_dataset = SequenceDataset(
-        image_folder='path/to/train_images',
+        image_folder='/root/autodl-tmp/Infrared_cloudmap/pic1028',
         input_frames=args.input_frames,
         target_frames=args.output_frames,
         resize_shape=(args.img_size, args.img_size)
     )
     val_dataset = SequenceDataset(
-        image_folder='path/to/val_images',
+        image_folder='/root/autodl-tmp/Infrared_cloudmap/pic1',
         input_frames=args.input_frames,
         target_frames=args.output_frames,
         resize_shape=(args.img_size, args.img_size)
@@ -75,13 +76,16 @@ def main():
     val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False)
 
     # 3) 训练
+    writer = SummaryWriter(log_dir=f"runs/{args.model_name}")
+
     device = torch.device(args.device if torch.cuda.is_available() else 'cpu')
     model, D = train_model(
         model_name=args.model_name,
         train_loader=train_loader,
         val_loader=val_loader,
         params=params,
-        device=device
+        device=device,
+        writer=writer
     )
 
     # 4) 测试和可视化
@@ -90,10 +94,11 @@ def main():
         model=model,
         test_loader=val_loader,     # test_loader
         device=device,
-        writer=None
+        writer=writer
     )
 
-    print("Final test results:", results)
+    # print("Final test results:", results)
+    writer.close()
 
 if __name__ == '__main__':
     main()
