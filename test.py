@@ -163,7 +163,7 @@ def test_model(model_name, model, test_loader, device, writer=None):
             if model_name in ['simple', 'encode2decode', 'encode2decode_unet']:
                 # 仅需要 (batch_data)
                 output = model(batch_data)
-            else:   # 'sa_encode2decode' | 'sa_encode2decode_gan'
+            else:   # 'sa_encode2decode' | 'sa_encode2decode_unet' | 'sa_encode2decode_gan'
                 # 需要 (frames, target, mask_true=None, is_training=False)
                 output = model(batch_data, batch_target, mask_true=None, is_training=False)
 

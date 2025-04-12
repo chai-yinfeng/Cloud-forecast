@@ -9,6 +9,7 @@ from model import (
     ConvLSTMEncode2Decode,
     ConvLSTMEncode2DecodeUNet,
     SA_ConvLSTMEncode2Decode,
+    SA_ConvLSTMEncode2DecodeUNet,
     Discriminator,
     generator_loss_function,
     sa_lstm_loss
@@ -27,7 +28,8 @@ def get_model(model_name: str, params: dict):
       - 'encode2decode' -> ConvLSTMEncode2Decode
       - 'encode2decode_unet' -> ConvLSTMEncode2DecodeUNet
       - 'sa_encode2decode' -> SA_ConvLSTMEncode2Decode
-      - 'sa_encode2decode_gan' -> SA_ConvLSTMEncode2Decode + GAN (or future extension)
+      - 'sa_encode2decode_gan' -> SA_ConvLSTMEncode2Decode + GAN
+      - 'sa_encode2decode_unet' -> SA_ConvLSTMEncode2DeocdeUNet
     """
     if model_name == 'simple':
         model = ConvLSTMSimple(params)
@@ -40,6 +42,8 @@ def get_model(model_name: str, params: dict):
     elif model_name == 'sa_encode2decode_gan':
         # 其实与上面相同，只是后续训练时会额外加入GAN过程
         model = SA_ConvLSTMEncode2Decode(params)
+    elif model_name == 'sa_encode2decode_unet':
+        model = SA_ConvLSTMEncode2DecodeUNet(params)
     else:
         raise ValueError(f"Unknown model name: {model_name}")
 
@@ -96,15 +100,15 @@ def train_basic_model(model, model_name, train_loader, val_loader, params, devic
       - ConvLSTMEncode2Decode
       - ConvLSTMEncode2DecodeUNet
       - SA_ConvLSTMEncode2Decode
+      - SA_ConvLSTMEncode2DecodeUNet
     """
     model = model.to(device)
     optimizer = Adam(model.parameters(), lr=params.get('lr', 1e-3))
     criterion = sa_lstm_loss    # 根据具体情况测试其他损失函数
 
     use_scheduled_sampling = False
-    if 'sa_encode2decode' in model_name:
-        # 如果是 'sa_encode2decode' 就启用schedule sampling
-        # 可改成判断 params['use_ss']==True 来更灵活
+    if 'sa' in model_name:
+        # 如果是 'sa_encode2decode' 或 'sa_encode2decode_unet' 就启用schedule sampling
         use_scheduled_sampling = True
         eta = params.get('sampling_start_value', 1.0)
 

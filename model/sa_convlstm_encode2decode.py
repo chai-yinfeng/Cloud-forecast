@@ -119,7 +119,8 @@ class SA_ConvLSTMEncode2Decode(nn.Module):
         return predict_temp_de
 
     def _init_hidden(self, batch_size: int, img_size: Tuple[int, int]):
+        downsampled_size = (img_size[0] // 4, img_size[1] // 4)
         states = []
         for i in range(self.n_layers):
-            states.append(self.cells[i].init_hidden(batch_size, img_size))
+            states.append(self.cells[i].init_hidden(batch_size, downsampled_size))
         return states

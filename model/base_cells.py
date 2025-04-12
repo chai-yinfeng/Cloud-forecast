@@ -207,9 +207,10 @@ class SA_ConvLSTMCell(nn.Module):
         """
         h, c, m 全零初始化: [B, hidden_dim, H, W]
         """
+        device = next(self.parameters()).device  # 或 self.conv2d[0].weight.device
         H, W = img_size
         return (
-            torch.zeros(batch_size, self.hidden_dim, H, W),
-            torch.zeros(batch_size, self.hidden_dim, H, W),
-            torch.zeros(batch_size, self.hidden_dim, H, W)
+            torch.zeros(batch_size, self.hidden_dim, H, W, device=device),
+            torch.zeros(batch_size, self.hidden_dim, H, W, device=device),
+            torch.zeros(batch_size, self.hidden_dim, H, W, device=device)
         )
