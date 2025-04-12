@@ -21,3 +21,41 @@ I will update this repository as I make progress in debugging the code.
 3. 类Unet结构、加入跳跃连接的上下采样ConvLSTM：顾名思义，借鉴了Unet网络的跳跃连接，也是在上一变体的基础上增强了其上采样过程中细节和特征恢复的能力，使模型能够捕捉更多云图边缘的细节。
 4. 引入自注意力机制的上下采样ConvLSTM：与上下采样的ConvLSTM结构类似，但区别是将特征图部分的普通ConvLSTM换成了SA-ConvLSTM。SA机制让ConvLSTM除了隐层和细胞状态以外，多维护一个memory块，用于控制长程输入的掩码。所以每次SA-ConvLSTM更新状态时，都需要经过注意力加权，增强其捕捉更长序列的特征和信息。**需要强调的是**，在SA-ConvLSTM模型中还增添了**scheduled sampling**。具体来说，对于一个seq2seq的任务，在训练过程中，模型是能够看到整个序列的，也就是在预测第n帧图像时，他可以看到第n-1帧的groundtruth，从而规范自己的预测，减少了累计误差的产生。但在实际任务中，将要预测的帧是看不到groundtruth的，所以模型要用自己预测出来的帧作为下一帧的参考，此时会有累积误差的问题。解决这一问题有两种方案，一种是在训练时直接不让模型看到groundtruth，对于一个用m张输入预测n张输出的任务，只有在 t < n 时，模型才能看到真实图像，其余情况下需要用之前生成的输出作为输入；另一种方案是，在训练过程中逐步减少模型能看到groundtruth的比例，具体实现是用一个逐渐迭代变小的 η 计算生成一张与输入数据形状相同的 mask，x = p * gt + (1-p) * out。p的取值在[0, 1]，p = 1 时表示使用真值，p = 0 时表示使用上一帧输出。通过这种方式逐渐减弱模型对groundtruth的依赖。这种方案实际上是比第一种更缓和。
 5. 在SA-ConvLSTM的基础上进一步添加GAN的网络：进一步升级，将上述模型看作一个生成器Generator，另外再训练一个判别器Discriminator。让判别器来判断真假序列（实际和预测），同时使用WGAN-GP中的梯度惩罚项GP（其余的损失函数部分和前面一样，都是自己定义的一个包含了ssim、l1、l2的联合损失）
+
+## 测试结果记录
+
+[TEST] simple:  total 494 batches
+  SSIM: 0.5854, first-frame=0.6488
+  MSE : 902.4744, first-frame=513.7155
+  PSNR: 20.5891, first-frame=22.9895
+  Sharpness: 17.2510, first-frame=24.6500
+
+[TEST] encode2decode:  total 494 batches
+  SSIM: 0.6560, first-frame=0.7186
+  MSE : 613.5381, first-frame=334.0006
+  PSNR: 22.0957, first-frame=24.6846
+  Sharpness: 16.8239, first-frame=20.1397
+
+[TEST] encode2decode_unet:  total 494 batches
+  SSIM: 0.6683, first-frame=0.7359
+  MSE : 562.3787, first-frame=303.9833
+  PSNR: 22.4931, first-frame=25.1641
+  Sharpness: 15.0505, first-frame=19.2110
+
+[TEST] sa_encode2decode:  total 494 batches
+  SSIM: 0.6723, first-frame=0.7620
+  MSE : 625.6488, first-frame=266.1339
+  PSNR: 22.5222, first-frame=25.9851
+  Sharpness: 11.4888, first-frame=15.1056
+
+[TEST] sa_encode2decode_unet:  total 494 batches
+  SSIM: 0.6820, first-frame=0.7699
+  MSE : 585.3086, first-frame=254.0380
+  PSNR: 22.6483, first-frame=26.0515
+  Sharpness: 12.6999, first-frame=16.7194
+
+[TEST] sa_encode2decode_gan:  total 494 batches
+  SSIM: 0.5980, first-frame=0.6771
+  MSE : 971.4693, first-frame=462.4611
+  PSNR: 19.6719, first-frame=22.6272
+  Sharpness: 12.1283, first-frame=14.0973
