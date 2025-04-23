@@ -142,7 +142,7 @@ def train_basic_model(model, model_name, train_loader, val_loader, params, devic
                 pred = model(batch_data)
 
             # 计算loss
-            loss, L_rec, L_ssim = criterion(pred, batch_target)
+            loss, L_rec, L_ssim, L_perc, L_edge = criterion(pred, batch_target)
             loss.backward()
             optimizer.step()
 
