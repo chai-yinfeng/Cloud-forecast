@@ -170,7 +170,7 @@ def train_basic_model(model, model_name, train_loader, val_loader, params, devic
                 else:
                     pred = model(val_data)
 
-                val_loss, L_rec, L_ssim = criterion(pred, val_target)
+                val_loss, L_rec, L_ssim, L_perc, L_edge = criterion(pred, val_target)
                 total_val_loss += val_loss.item()
                 val_count += 1
 

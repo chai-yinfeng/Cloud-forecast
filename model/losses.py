@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torchvision import models
 from skimage.metrics import structural_similarity as ssim
+from typing import Tuple, List, Optional, Dict, Any
 
 # 感知损失
 class PerceptualLoss(nn.Module):
@@ -56,11 +57,11 @@ class EdgeLoss(nn.Module):
         """
         x, y: [B, 1, H, W] or [B, C, H, W] (直接逐通道计算)
         """
-        kb = self.kernel.to(x)
+        k = self.kernel.to(x)
         pad = k.size(-1) // 2
 
-        ex = F.conv2d(x, kb, padding=pad)
-        ey = F.conv2d(y, kb, padding=pad)
+        ex = F.conv2d(x, k, padding=pad)
+        ey = F.conv2d(y, k, padding=pad)
 
         if self.mode == 'sobel':
             gx_x, gx_y = ex.split(1, dim=1)
@@ -120,7 +121,7 @@ def sa_lstm_loss(output, target,
                  lambda_ssim: float = 1e-2,
                  lambda_perc: float = 1e-1,
                  lambda_edge: float = 1e-2,
-                 use_perceptual: bool = True,
+                 use_perceptual: bool = False,
                  use_edge: bool = True):
     loss_mae = nn.L1Loss()
     loss_mse = nn.MSELoss()
